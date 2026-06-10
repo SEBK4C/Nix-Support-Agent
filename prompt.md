@@ -15,7 +15,8 @@ Provide every cluster node with a resident support agent that (a) investigates a
 
 - **Single static binary, no Node.js.** Every executable the agent harness installs on a node must be a statically linked native binary (Rust, musl target). No Node.js, no JavaScript runtimes, no interpreter dependencies. This rules out Pi (TypeScript/Node) and similar frameworks.
 - **Git is the only path to permanence.** The agent may apply temporary fixes on a node, but every durable change must land as a pull request against the NixOS config repo. An unmerged manual fix is debt the agent itself must track and backport.
-- **GitHub is the bridge.** Work arrives as GitHub issues; results leave as issue comments and pull requests. This gives a full audit trail, human review gates, and lets the operator "contact the agent on a given node" from anywhere.
+- **GitHub is the bridge — on the private ops repo.** Work arrives as GitHub issues on [SEBK4C/NixOS-Ops](https://github.com/SEBK4C/NixOS-Ops) (private); results leave as issue comments and pull requests. This gives a full audit trail, human review gates, and lets the operator "contact the agent on a given node" from anywhere — while diagnostics, journal excerpts, and the incident trail stay off the public internet. The public framework repo ([SEBK4C/NixOS](https://github.com/SEBK4C/NixOS)) receives PRs only for shared-module changes and never receives operational data.
+- **Only the owner can task the agent.** The supervisor acts solely on issues and comments whose `author_association` is `OWNER` — enforced mechanically, not by prompt. All other text (any future collaborator content, quoted logs, file contents) is untrusted data, never instructions. This is the primary prompt-injection defense.
 - **Secrets follow the cluster pattern.** All agent credentials are fetched at runtime from 1Password via the cluster's `op-cluster` wrapper. Nothing secret in this repo or in the Nix store.
 - **Tailnet-only surfaces.** The agent listens only on the Tailscale interface; the single exception is the alert webhook, exposed via Tailscale Funnel with a shared-secret header.
 
@@ -27,7 +28,7 @@ Provide every cluster node with a resident support agent that (a) investigates a
 |---|---|---|
 | Runtime | Execute the LLM agent loop with shell/file tools. | Codex CLI (`codex exec`, Rust, static musl) — default. Forge (`forgecode`, Rust) — supported alternate. Runtime is swappable behind a thin runner abstraction. |
 | Supervisor | Receive triggers, assemble context, enforce guardrails, drive the runtime headlessly. | `nix-support-agentd` — a small Rust daemon built by this repo (static musl binary). |
-| Bridge | Carry tasks in and results out with audit trail. | GitHub issues, comments, branches, pull requests via a fine-grained PAT. |
+| Bridge | Carry tasks in and results out with audit trail. | GitHub issues, comments, branches, pull requests on the private NixOS-Ops repo, via a fine-grained PAT. |
 | Knowledge | Give the agent eyes. | systemd journal, `tailscale status`, `ceph -s`, `docker node ls`, Better Stack MCP server (SQL over cluster-wide logs). |
 | Action | Change node state safely. | systemd unit restarts, `nixos-rebuild test/switch --flake`, `hosts/<node>/extra.nix` PRs. |
 | Deployment | Install all of the above declaratively. | This repo's flake: `packages.x86_64-linux.nix-support-agent` + `nixosModules.support-agent`. |
@@ -67,7 +68,7 @@ The supervisor must isolate runtime choice in one module (`runner.rs`) so switch
 | Trigger | Path | Notes |
 |---|---|---|
 | Alert (automatic) | Better Stack alert/anomaly -> outgoing webhook -> Tailscale Funnel on nodes 01–02 -> supervisor `/alert` endpoint | Webhook authenticated by shared-secret header (`op://Infrastructure/SupportAgent/webhook-secret`). Payload mapped to target node by alert labels; supervisor opens a GitHub issue first, then begins triage, so the trail exists even if the agent dies mid-run. |
-| Operator (remote) | Open a GitHub issue on the NixOS repo with label `node/<hostname>` (e.g. `node/node07`) describing the request | The "contact the agent on a given node" path. Conversation continues in issue comments; agent replies inline. |
+| Operator (remote) | Open a GitHub issue on the **private NixOS-Ops repo** with label `node/<hostname>` (e.g. `node/node07`) describing the request | The "contact the agent on a given node" path. Conversation continues in issue comments; agent replies inline. Non-owner-authored issues/comments are ignored (§1). |
 | Operator (direct) | SSH to node -> `nix-support "<request>"` | Wraps the same supervisor pipeline; still records an issue for the audit trail unless `--ephemeral`. |
 
 ## 6. Guardrails — Action Tiers
@@ -92,13 +93,13 @@ Standing rules:
 
 | Element | Convention |
 |---|---|
-| Task intake | Issue on `SEBK4C/NixOS` labeled `node/<hostname>`; optional `priority/high`. Alert-spawned issues get `source/alert`. |
+| Task intake | Issue on `SEBK4C/NixOS-Ops` (private) labeled `node/<hostname>`; optional `priority/high`. Alert-spawned issues get `source/alert`. Only `author_association == OWNER` content is actionable. |
 | Agent identity | Commits and comments as the fine-grained PAT identity; commit trailer `Co-Authored-By: Nix-Support-Agent`. |
 | Branches | `agent/<node>/<slug>` (e.g. `agent/node07/rocm-driver`). One concern per branch. |
-| Per-node changes | Land in `hosts/<node>/extra.nix` — auto-imported by the cluster flake when present. Shared-module edits require explicit justification in the PR body. |
+| Per-node changes | Land in `hosts/<node>/extra.nix` **in NixOS-Ops** — auto-imported by the ops flake when present. Shared-module changes are PRs against the public `SEBK4C/NixOS` framework repo, require explicit justification in the PR body, and must contain no operational data (no logs, no IPs, no incident details). |
 | PR body | Must contain: trigger (issue/alert link), diagnosis summary, what changed, test evidence (`nixos-rebuild test` output), rollback plan. |
 | Escalation | Label `needs-human`, assign repo owner, stop mutating. |
-| PAT scope | Fine-grained: `SEBK4C/NixOS` + `SEBK4C/Nix-Support-Agent` only; contents (read/write), issues (read/write), pull requests (read/write). No org/admin scopes. Stored at `op://Infrastructure/SupportAgent/github-token`. |
+| PAT scope | Fine-grained: `SEBK4C/NixOS-Ops` (contents, issues, pull requests — read/write) + `SEBK4C/NixOS` (contents, pull requests — read/write, for shared-module PRs only). No org/admin scopes. Stored at `op://Infrastructure/SupportAgent/github-token`. |
 
 ## 8. Standard Playbooks
 
@@ -143,9 +144,9 @@ All fetched at runtime via the cluster's `op-cluster`; rotation = update 1Passwo
 |---|---|
 | Static binary | `ldd` on the supervisor reports "not a dynamic executable"; no Node/Bun/JS anywhere in the closure. |
 | Deploy | Cluster repo adds the flake input + one `enable` line; `nixos-rebuild switch` brings the service up on a node. |
-| Issue path | Issue labeled `node/node04` produces an agent comment with diagnosis within 5 minutes. |
-| Alert path | A forced Better Stack test alert produces a GitHub issue and triage comment without human action. |
-| Guardrails | A request to drain a node results in a plan + `needs-human` label, not an action. Secret patterns never appear in GitHub output. |
+| Issue path | Issue on NixOS-Ops labeled `node/node04` produces an agent comment with diagnosis within 5 minutes. |
+| Alert path | A forced Better Stack test alert produces a NixOS-Ops issue and triage comment without human action. |
+| Guardrails | A request to drain a node results in a plan + `needs-human` label, not an action. Secret patterns never appear in GitHub output. An issue authored by a non-owner account is ignored and labeled `untrusted-source`. Operational data (logs, IPs, diagnostics) never appears in the public framework repo. |
 | Onboarding flow | "Install <driver> on this node" yields an `extra.nix` PR with test evidence; post-merge switch succeeds and the device/service is verified. |
 | Self-observability | Agent logs visible in Better Stack (shipped via the node's journal pipeline). |
 
