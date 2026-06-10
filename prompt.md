@@ -133,6 +133,7 @@ All fetched at runtime via the cluster's `op-cluster`; rotation = update 1Passwo
 - [ ] Supervisor daemon (`nix-support-agentd`): GitHub poller, tailnet webhook listener, context assembler, tier-enforcing runner, GitHub reporter.
 - [ ] Operator CLI (`nix-support`) wrapping the same pipeline.
 - [ ] `runner.rs` abstraction with `codex` (default), `forge`, and `goose` backends.
+- [ ] `bridge.rs` forge abstraction: all issue/comment/branch/PR operations behind one trait with a `github` backend, so a future move to self-hosted Forgejo or GitLab is a new backend module, not a rewrite. No GitHub API calls outside this module.
 - [ ] `playbooks/` directory (§8) versioned alongside the code.
 - [ ] NixOS module options: `services.nix-support-agent.{enable, runtime, repo, node, webhookListener.enable}`.
 - [ ] NixOS VM test (`nix flake check`): module starts, poller runs against a mock GitHub API, tier enforcement blocks a Tier 3 command.
